@@ -3,10 +3,13 @@ from config import get_settings
 from typing import Optional, Dict
 import json
 import base64
-import hashlib
+import io
+from PIL import Image
+import imagehash
 
 def get_image_hash(image_bytes: bytes) -> str:
-    return hashlib.sha256(image_bytes).hexdigest()
+    image = Image.open(io.BytesIO(image_bytes))
+    return str(imagehash.phash(image))
 
 settings = get_settings()
 

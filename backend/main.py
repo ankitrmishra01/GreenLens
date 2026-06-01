@@ -11,6 +11,7 @@ from sqlalchemy import desc, func
 from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
 import bcrypt
+import imagehash
 
 from database import engine, get_db, Base
 from models import User, Activity, UserStats, Leaderboard, Nudge
@@ -140,6 +141,31 @@ def get_current_user(
         raise exc
     return user
 
+def is_image_duplicate(db: Session, new_hash_str: str) -> bool:
+    if not new_hash_str:
+        return False
+    try:
+        new_hash = imagehash.hex_to_hash(new_hash_str)
+    except Exception:
+        return False
+        
+    time_bound = datetime.now(timezone.utc) - timedelta(days=30)
+    # Fetch all hashes from the last 30 days
+    recent_activities = db.query(Activity.image_hash).filter(
+        Activity.created_at >= time_bound,
+        Activity.image_hash.isnot(None)
+    ).all()
+    
+    for (stored_hash_str,) in recent_activities:
+        try:
+            stored_hash = imagehash.hex_to_hash(stored_hash_str)
+            # A Hamming distance of <= 5 indicates the images are very similar
+            if new_hash - stored_hash <= 5:
+                return True
+        except Exception:
+            continue
+    return False
+
 # ── CO2 category mapping ───────────────────────────────────────────────────────
 
 TYPE_TO_CATEGORY = {
@@ -234,10 +260,8 @@ def log_activity(
     category_key = TYPE_TO_CATEGORY.get(activity_type, "car_km")
     co2_kg = calculate_co2(activity_type, category_key, activity.value, activity.region)
 
-    if activity.image_hash:
-        existing = db.query(Activity).filter(Activity.image_hash == activity.image_hash).first()
-        if existing:
-            raise HTTPException(status_code=400, detail="This exact image has already been logged. Spam detected.")
+    if activity.image_hash and is_image_duplicate(db, activity.image_hash):
+        raise HTTPException(status_code=400, detail="This exact image has already been logged. Spam detected.")
     
     if activity.receipt_id:
         existing = db.query(Activity).filter(Activity.receipt_id == activity.receipt_id).first()
@@ -309,10 +333,9 @@ async def scan_activity_image(
 
     image_bytes = await file.read()
     
-    # Check for exact duplicate before calling Gemini API (saves cost & time)
+    # Check for visual duplicate before calling Gemini API (saves cost & time)
     image_hash = get_image_hash(image_bytes)
-    existing = db.query(Activity).filter(Activity.image_hash == image_hash).first()
-    if existing:
+    if is_image_duplicate(db, image_hash):
         raise HTTPException(status_code=400, detail="This exact image has already been logged. Spam detected.")
         
     result = scan_receipt_or_food(image_bytes, file.content_type)
